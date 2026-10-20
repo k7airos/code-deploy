@@ -13,6 +13,9 @@ const profile: Profile = {
   outputDir: "dist", expectedBranch: "main", auth: "ssh", passwordEnv: "TEST_DEPLOY_PASSWORD"
 };
 
+// 远程脚本与 mock 依赖 POSIX 可执行文件：Windows 上 libuv 只补 .exe，命中不了无扩展名脚本。
+const posixOnly = process.platform === "win32" ? "仅在 POSIX 环境运行：依赖 /bin/sh 与无扩展名可执行文件" : false;
+
 test("内联密码字段优先于环境变量和钥匙串", async () => {
   const inline = profileSchema.parse({ ...newProfile(), id: "inline", name: "内联", host: "example.test", remoteDir: "/srv/app", auth: "env", passwordEnv: "NOPE", password: "inline-secret" });
   assert.equal(await resolvePassword(inline), "inline-secret");
@@ -25,7 +28,10 @@ test("配置校验、原子保存、文件权限和损坏文件保护", async ()
     const file = path.join(temporary, "config.json");
     assert.deepEqual((await loadConfig(file)).profiles, []);
     await saveConfig({ version: 1, profiles: [profile] }, file);
-    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    // Windows 的 chmod 只实现只读位，权限位无法直接断言。
+    const mode = (await stat(file)).mode & 0o777;
+    if (process.platform === "win32") assert.equal(mode & 0o200, 0o200);
+    else assert.equal(mode, 0o600);
     assert.deepEqual((await loadConfig(file)).profiles, [profile]);
     await assert.rejects(saveConfig({ version: 1, profiles: [profile, profile] }, file));
     assert.equal(profileSchema.safeParse({ ...profile, host: "-oProxyCommand=bad" }).success, false);
@@ -52,7 +58,7 @@ test("错误分支在构建前阻断", async () => {
   } finally { process.chdir(originalCwd); await rm(temporary, { recursive: true, force: true }); }
 });
 
-test("远程脚本在临时目录完成解压、备份，保护父目录，并处理失败恢复", async () => {
+test("远程脚本在临时目录完成解压、备份，保护父目录，并处理失败恢复", { skip: posixOnly }, async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "code-deploy-switch-test-"));
   try {
     const parent = path.join(temporary, "server with ' quote");
@@ -86,7 +92,7 @@ test("远程脚本在临时目录完成解压、备份，保护父目录，并�
     const bin = path.join(temporary, "bin");
     await mkdir(bin);
     await writeFile(path.join(bin, "mv"), '#!/bin/sh\ncase "$1" in *.stage-rollback) exit 1;; esac\nexec /bin/mv "$@"\n', { mode: 0o700 });
-    await assert.rejects(run("/bin/sh", ["-c", remoteDeployScript(remote, archive, "rollback")], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }));
+    await assert.rejects(run("/bin/sh", ["-c", remoteDeployScript(remote, archive, "rollback")], { env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` } }));
     assert.equal(await readFile(path.join(target, "index.html"), "utf8"), "new");
     await assert.rejects(stat(path.join(parent, ".dist.code-deploy-lock")));
 
@@ -96,7 +102,7 @@ test("远程脚本在临时目录完成解压、备份，保护父目录，并�
   } finally { await rm(temporary, { recursive: true, force: true }); }
 });
 
-test("模拟 SSH 完整部署链：构建、归档、上传、切换及端口", async () => {
+test("模拟 SSH 完整部署链：构建、归档、上传、切换及端口", { skip: posixOnly }, async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "code-deploy-flow-test-"));
   const originalPath = process.env.PATH;
   const originalCwd = process.cwd();
@@ -112,7 +118,7 @@ test("模拟 SSH 完整部署链：构建、归档、上传、切换及端口", 
     const options = `while [ "$#" -gt 0 ]; do case "$1" in -o|-p|-P) shift 2;; *) break;; esac; done`;
     await writeFile(path.join(bin, "scp"), `#!/bin/sh\nprintf '%s\\n' "$@" >> ${quote(trace)}\n${options}\ncp "$1" "\${2#*:}"\n`, { mode: 0o700 });
     await writeFile(path.join(bin, "ssh"), `#!/bin/sh\nprintf '%s\\n' "$@" >> ${quote(trace)}\nif [ -n "$CODE_DEPLOY_SSH_PASSWORD" ]; then test "$("$SSH_ASKPASS")" = "$CODE_DEPLOY_SSH_PASSWORD" || exit 1; printf '%s\\n' "$CODE_DEPLOY_SSH_PASSWORD"; fi\n${options}\nshift\nexec /bin/sh -c "$1"\n`, { mode: 0o700 });
-    process.env.PATH = `${bin}:${originalPath}`;
+    process.env.PATH = `${bin}${path.delimiter}${originalPath}`;
     process.chdir(project);
     const events: string[] = [];
     await deploy({ ...profile, projectDir: project, remoteDir: target, port: 2222 }, event => {
@@ -146,9 +152,33 @@ test("模拟 SSH 完整部署链：构建、归档、上传、切换及端口", 
 
 test("取消命令终止子进程", async () => {
   const controller = new AbortController();
-  const command = run("/bin/sh", ["-c", "sleep 30"], { signal: controller.signal });
+  // 用当前 Node 充当长跑子进程，避免依赖 POSIX shell。
+  const command = run(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { signal: controller.signal });
   controller.abort();
   await assert.rejects(command, /操作已取消/);
+});
+
+test("构建产物含符号链接时拒绝发布", async (t) => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "code-deploy-symlink-test-"));
+  const originalCwd = process.cwd();
+  try {
+    const project = path.join(temporary, "project");
+    const output = path.join(project, "dist");
+    await mkdir(output, { recursive: true });
+    await writeFile(path.join(output, "index.html"), "new");
+    try {
+      await symlink(path.join(output, "index.html"), path.join(output, "link.html"), "file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      t.skip("当前系统不允许创建符号链接：Windows 需管理员或开发者模式");
+      return;
+    }
+    process.chdir(project);
+    await assert.rejects(deploy({
+      ...profile, projectDir: project, outputDir: "dist", buildCommand: "", expectedBranch: "",
+      lockBranch: false, lockDirectory: false, lockMapping: false, checkGit: false
+    }, () => {}), /符号链接/);
+  } finally { process.chdir(originalCwd); await rm(temporary, { recursive: true, force: true }); }
 });
 
 test("远程输出中的 version.json 解析为逐行键值，非法内容保留原文", () => {

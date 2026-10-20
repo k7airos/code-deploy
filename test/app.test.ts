@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout } from "node:timers/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { createElement } from "react";
 import { render } from "ink-testing-library";
 import { App } from "../src/app.js";
 import { Settings } from "../src/settings.js";
+import { run } from "../src/deploy.js";
 import { newProfile, type Profile } from "../src/config.js";
 
 const profile = { ...newProfile(), id: "example", name: "测试环境", host: "example.test", user: "deploy", remoteDir: "/srv/web" };
@@ -86,8 +90,14 @@ test("开关字段空格切换，登录方式方向键循环", async () => {
 });
 
 test("TUI 显示 Git 提醒并等待选择，拒绝后结束发布", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "code-deploy-tui-git-test-"));
+  const originalCwd = process.cwd();
   const instance = render(createElement(App, { initialId: profile.id, initialConfig: { version: 1, profiles: [profile] } }));
   try {
+    // 用本地临时仓库代替真实仓库：预检不依赖网络 fetch，用例结果稳定。
+    await run("git", ["init", "-b", "main"], { cwd: temporary });
+    await run("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "test"], { cwd: temporary });
+    process.chdir(temporary);
     await setTimeout(80);
     instance.stdin.write("\r"); await setTimeout(60);
     instance.stdin.write("y");
@@ -95,7 +105,11 @@ test("TUI 显示 Git 提醒并等待选择，拒绝后结束发布", async () =>
     assert.match(instance.lastFrame()!, /尚未执行构建或上传/);
     instance.stdin.write("n");
     await waitFor(instance, /已取消发布/);
-  } finally { instance.unmount(); instance.cleanup(); }
+  } finally {
+    instance.unmount(); instance.cleanup();
+    process.chdir(originalCwd);
+    await rm(temporary, { recursive: true, force: true });
+  }
 });
 
 test("发布确认屏隐藏列表、标题为发布项；d 复制当前配置进入向导", async () => {

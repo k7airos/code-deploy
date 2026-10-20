@@ -52,6 +52,22 @@ if [ -d "$target" ]; then ls -ld "$target"; ls -1 "$target" | head -20; else ech
 const versionBegin = "__CODE_DEPLOY_VERSION_BEGIN__";
 const versionEnd = "__CODE_DEPLOY_VERSION_END__";
 
+// 递归查找符号链接；不依赖外部 find，Windows 上的 find 不是 GNU 版本会直接失败。
+export async function findSymlinks(directory: string, signal?: AbortSignal): Promise<string[]> {
+  const found: string[] = [];
+  const pending = [directory];
+  while (pending.length) {
+    if (signal?.aborted) throw new Error("操作已取消");
+    const current = pending.pop()!;
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) found.push(full);
+      else if (entry.isDirectory()) pending.push(full);
+    }
+  }
+  return found;
+}
+
 // 先完整解压，再保留旧版本并切换；失败时恢复旧目录。
 export function remoteDeployScript(profile: Profile, archive: string, token: string): string {
   const target = path.posix.normalize(profile.remoteDir).replace(/\/$/, "");
@@ -130,8 +146,8 @@ export async function deploy(profile: Profile, emit: (event: DeployEvent) => voi
   if (!(await lstat(output)).isDirectory()) throw new Error("构建产物不是目录");
   if (!(await readdir(output)).length) throw new Error("发布目录为空");
   // 禁止归档符号链接，避免服务器解压时逃离暂存目录。
-  const links = await run("find", [output, "-type", "l"], { signal });
-  if (links) throw new Error(`构建产物包含符号链接，请先移除：\n${links}`);
+  const links = await findSymlinks(output, signal);
+  if (links.length) throw new Error(`构建产物包含符号链接，请先移除：\n${links.join("\n")}`);
   const temporary = await mkdtemp(path.join(tmpdir(), "code-deploy-build-"));
   const token = randomUUID();
   const localArchive = path.join(temporary, "dist.tar.gz");

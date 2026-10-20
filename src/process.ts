@@ -19,8 +19,8 @@ export function run(command: string, args: string[], options: RunOptions = {}): 
         if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
         else child.kill(signal);
       } catch (error) {
-        // macOS 对只剩僵尸进程的组 kill 返回 EPERM，与 ESRCH 同样无需处理
-        if (!["ESRCH", "EPERM"].includes((error as NodeJS.ErrnoException).code!)) throw error;
+        // macOS 对只剩僵尸进程的组 kill 返回 EPERM，Windows 上进程已退出返回 EINVAL，均无需处理
+        if (!["ESRCH", "EPERM", "EINVAL"].includes((error as NodeJS.ErrnoException).code!)) throw error;
       }
     }
     const abort = () => {
