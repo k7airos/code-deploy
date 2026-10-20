@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { stripVTControlCharacters } from "node:util";
 
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal; onOutput?: (text: string) => void; shell?: boolean };
@@ -14,6 +14,7 @@ export function run(command: string, args: string[], options: RunOptions = {}): 
     });
     let output = "";
     let killTimer: NodeJS.Timeout | undefined;
+    let treeKill: Promise<void> | undefined;
     function kill(signal: NodeJS.Signals) {
       try {
         if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
@@ -24,6 +25,19 @@ export function run(command: string, args: string[], options: RunOptions = {}): 
       }
     }
     const abort = () => {
+      // Windows 的 child.kill 只结束 cmd.exe，taskkill 同时结束构建子进程。
+      if (process.platform === "win32" && child.pid) {
+        treeKill = new Promise(resolve => {
+          execFile("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, error => {
+            if (error) {
+              child.kill();
+              reject(new Error(`操作已取消，但终止 Windows 子进程树失败，请检查残留进程：${error.message}`));
+            }
+            resolve();
+          });
+        });
+        return;
+      }
       kill("SIGTERM");
       killTimer = setTimeout(() => kill("SIGKILL"), 3000);
       killTimer.unref();
@@ -37,7 +51,10 @@ export function run(command: string, args: string[], options: RunOptions = {}): 
     child.stderr.setEncoding("utf8").on("data", collect);
     options.signal?.addEventListener("abort", abort, { once: true });
     child.on("error", reject);
-    child.on("close", (code, signal) => {
+    child.on("close", async (code, signal) => {
+      await treeKill;
+      // shell 先退出时仍清理整个进程组，避免提前清掉强制终止定时器后留下构建进程。
+      if (options.signal?.aborted && process.platform !== "win32") kill("SIGKILL");
       clearTimeout(killTimer);
       options.signal?.removeEventListener("abort", abort);
       if (options.signal?.aborted) reject(new Error("操作已取消；若已进入远程切换阶段，请检查服务器上的当前版本"));

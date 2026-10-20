@@ -16,10 +16,26 @@ export function isSafeRemoteDir(value: string): boolean {
     !["bin", "sbin", "etc", "usr", "lib", "lib64", "proc", "sys", "dev", "boot", "run"].includes(parts[0]!);
 }
 
+// 按完整路径段判断重叠，避免把 app 与 app2 当作父子目录。
+function remoteDirsOverlap(first: string, second: string): boolean {
+  const a = path.posix.normalize(first).replace(/\/$/, "");
+  const b = path.posix.normalize(second).replace(/\/$/, "");
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+const remoteDirsSchema = z.array(z.string().refine(isSafeRemoteDir, "远程目录必须是至少两级的绝对路径，且不能是系统目录"))
+  .min(1, "至少配置一个远程目录").superRefine((dirs, context) => {
+    for (const [index, dir] of dirs.entries()) {
+      if (dirs.slice(0, index).some(previous => remoteDirsOverlap(previous, dir))) {
+        context.addIssue({ code: "custom", message: "远程目录不能重复或互为父子目录", path: [index] });
+      }
+    }
+  });
+
 const mappingSchema = z.object({
   projectDir: singleLine.refine(path.isAbsolute), branch: singleLine.min(1),
   host: singleLine.min(1), user: singleLine.min(1), port: z.number().int().min(1).max(65535),
-  remoteDir: z.string().refine(isSafeRemoteDir)
+  remoteDirs: remoteDirsSchema
 });
 
 export const profileSchema = z.object({
@@ -29,7 +45,7 @@ export const profileSchema = z.object({
   host: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/, "请输入 IP、主机名或 SSH 别名"),
   user: z.string().regex(/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/, "请输入服务器账号"),
   port: z.number().int().min(1).max(65535),
-  remoteDir: z.string().refine(isSafeRemoteDir, "远程目录必须是至少两级的绝对路径，且不能是系统目录"),
+  remoteDirs: remoteDirsSchema,
   buildCommand: singleLine,
   outputDir: singleLine.min(1).refine(value => !path.isAbsolute(value) && !value.split(/[\\/]/).includes(".."), "发布内容必须是源目录内的相对路径，或使用 . 发布源目录本身"),
   expectedBranch: singleLine,
@@ -60,24 +76,34 @@ const configSchema = z.object({ version: z.literal(1), profiles: z.array(profile
       if (other.id === profile.id || !other.lockMapping || !other.mapping || !mapping) continue;
       const sameSource = path.resolve(mapping.projectDir) === path.resolve(other.mapping.projectDir);
       const sameTarget = targetKey(mapping) === targetKey(other.mapping);
-      if (sameSource !== sameTarget) context.addIssue({ code: "custom", message: `${profile.name} 与 ${other.name} 的锁定映射不是一一对应` });
+      const sameServer = mapping.host === other.mapping.host && mapping.user === other.mapping.user && mapping.port === other.mapping.port;
+      const overlapping = sameServer && mapping.remoteDirs.some(dir => other.mapping!.remoteDirs.some(otherDir => remoteDirsOverlap(dir, otherDir)));
+      if ((sameSource && !sameTarget) || (!sameSource && overlapping)) {
+        context.addIssue({ code: "custom", message: `${profile.name} 与 ${other.name} 的锁定映射不是一一对应，或远程目录存在重叠` });
+      }
     }
   }
 });
 export type Config = z.infer<typeof configSchema>;
 
-// 服务器和目录共同标识远程目标，规范化末尾斜线。
-export function targetKey(target: Pick<Profile, "host" | "user" | "port" | "remoteDir">): string {
-  return JSON.stringify([target.host, target.user, target.port, path.posix.normalize(target.remoteDir).replace(/\/$/, "")]);
+// 服务器和目录集合共同标识远程目标，规范化末尾斜线并按目录排序。
+export function targetKey(target: Pick<Profile, "host" | "user" | "port" | "remoteDirs">): string {
+  const dirs = target.remoteDirs.map(dir => path.posix.normalize(dir).replace(/\/$/, "")).sort();
+  return JSON.stringify([target.host, target.user, target.port, dirs]);
 }
 
-// 旧配置曾固定从 projectDir 构建，迁移时显式保留这一约束。
+// 旧配置曾固定从 projectDir 构建、只有一个远程目录，迁移时显式保留这些约束。
 function migrateConfig(value: unknown): unknown {
   if (!value || typeof value !== "object" || !("profiles" in value) || !Array.isArray(value.profiles)) return value;
   return { ...value, profiles: value.profiles.map(profile => ({
     ...profile,
     lockDirectory: profile.lockDirectory ?? true,
-    lockBranch: profile.lockBranch ?? Boolean(profile.expectedBranch)
+    lockBranch: profile.lockBranch ?? Boolean(profile.expectedBranch),
+    remoteDirs: profile.remoteDirs ?? (profile.remoteDir ? [profile.remoteDir] : []),
+    ...(profile.mapping ? { mapping: {
+      ...profile.mapping,
+      remoteDirs: profile.mapping.remoteDirs ?? (profile.mapping.remoteDir ? [profile.mapping.remoteDir] : [])
+    } } : {})
   })) };
 }
 
@@ -104,7 +130,7 @@ export async function saveConfig(config: Config, file = configFile): Promise<voi
 export function newProfile(): Profile {
   return {
     id: "", name: "", projectDir: process.cwd(), host: "", user: process.env.USER || "deploy", port: 22,
-    remoteDir: "", buildCommand: "", outputDir: ".",
+    remoteDirs: [], buildCommand: "", outputDir: ".",
     expectedBranch: "", auth: "ssh", passwordEnv: "DEPLOY_SERVER_PASSWORD",
     lockDirectory: false, lockBranch: false, lockMapping: false, checkGit: true
   };

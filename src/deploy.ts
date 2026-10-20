@@ -40,12 +40,22 @@ async function withSsh<T>(profile: Profile, task: (ssh: (command: string, args: 
   }
 }
 
+// 检查目标及全部祖先路径，阻止通过上级符号链接绕过目录保护。
+const remotePathGuard = `ancestor=$target
+while [ "$ancestor" != / ]; do
+  if [ -L "$ancestor" ]; then echo "目标或上级目录是符号链接，请填写真实路径: $ancestor" >&2; exit 1; fi
+  ancestor=\${ancestor%/*}
+  [ -n "$ancestor" ] || ancestor=/
+done`;
+
 export async function checkServer(profile: Profile, signal?: AbortSignal): Promise<string> {
   profileSchema.parse(profile);
   return withSsh(profile, ssh => ssh("ssh", [`${profile.user}@${profile.host}`, `set -eu
-target=${quote(profile.remoteDir)}
-if [ -L "$target" ]; then echo '目标目录是符号链接，请选择真实目录' >&2; exit 1; fi
-if [ -d "$target" ]; then ls -ld "$target"; ls -1 "$target" | head -20; else echo '目标尚不存在，部署时会创建'; fi`], { signal }));
+for target in ${profile.remoteDirs.map(dir => quote(path.posix.normalize(dir).replace(/\/$/, ""))).join(" ")}; do
+  echo "== $target"
+  ${remotePathGuard}
+  if [ -d "$target" ]; then ls -ld "$target"; ls -1 "$target" | head -20; else echo '目标尚不存在，部署时会创建'; fi
+done`], { signal }));
 }
 
 // version.json 用标记包裹传回，本地解析后美化展示。
@@ -69,8 +79,8 @@ export async function findSymlinks(directory: string, signal?: AbortSignal): Pro
 }
 
 // 先完整解压，再保留旧版本并切换；失败时恢复旧目录。
-export function remoteDeployScript(profile: Profile, archive: string, token: string): string {
-  const target = path.posix.normalize(profile.remoteDir).replace(/\/$/, "");
+export function remoteDeployScript(dir: string, archive: string, token: string): string {
+  const target = path.posix.normalize(dir).replace(/\/$/, "");
   const parent = path.posix.dirname(target);
   const name = path.posix.basename(target);
   return `set -eu
@@ -81,8 +91,8 @@ stage=${quote(`${parent}/.${name}.stage-${token}`)}
 backup=${quote(`${parent}/.${name}.backup-${token}`)}
 lock=${quote(`${parent}/.${name}.code-deploy-lock`)}
 switched=0
+${remotePathGuard}
 mkdir -p "$parent"
-if [ -L "$target" ]; then echo '目标目录是符号链接，已停止' >&2; exit 1; fi
 if [ -e "$target" ] && [ ! -d "$target" ]; then echo '目标不是目录，已停止' >&2; exit 1; fi
 if ! mkdir "$lock"; then echo '目标正在部署或留有锁目录，请核实后处理' >&2; exit 1; fi
 cleanup() {
@@ -90,7 +100,6 @@ cleanup() {
   trap - EXIT HUP INT TERM
   if [ "$switched" = 0 ] && [ -d "$backup" ] && [ ! -e "$target" ]; then mv "$backup" "$target"; fi
   rm -rf -- "$stage"
-  rm -f -- "$archive"
   rmdir "$lock"
   exit "$status"
 }
@@ -151,18 +160,35 @@ export async function deploy(profile: Profile, emit: (event: DeployEvent) => voi
   const temporary = await mkdtemp(path.join(tmpdir(), "code-deploy-build-"));
   const token = randomUUID();
   const localArchive = path.join(temporary, "dist.tar.gz");
-  const remoteArchive = `/tmp/code-deploy-${token}.tar.gz`;
+  const remoteTemporary = `/tmp/code-deploy-${token}`;
+  const remoteArchive = `${remoteTemporary}/archive.tar.gz`;
   try {
     step(2);
     await run("tar", [...(process.platform === "darwin" ? ["--no-xattrs"] : []), "-czf", localArchive, "-C", output, "."], {
       signal, env: { ...process.env, COPYFILE_DISABLE: "1" }
     });
     await withSsh(profile, async ssh => {
-      await ssh("scp", [localArchive, `${profile.user}@${profile.host.includes(":") ? `[${profile.host}]` : profile.host}:${remoteArchive}`], { signal, onOutput: log });
-      step(3);
-      let remoteOutput = "";
-      await ssh("ssh", [`${profile.user}@${profile.host}`, remoteDeployScript(profile, remoteArchive, token)], { signal, onOutput: text => { remoteOutput += text; } });
-      log(formatRemoteOutput(remoteOutput));
+      const destination = `${profile.user}@${profile.host}`;
+      // 私有目录保护上传产物；目录名冲突时拒绝复用。
+      await ssh("ssh", [destination, `umask 077\nmkdir ${quote(remoteTemporary)}`], { signal });
+      try {
+        await ssh("scp", [localArchive, `${profile.user}@${profile.host.includes(":") ? `[${profile.host}]` : profile.host}:${remoteArchive}`], { signal, onOutput: log });
+        step(3);
+        // 同一份产物按顺序切换到每个目标目录，任一失败即中断。
+        for (const dir of profile.remoteDirs) {
+          log(`切换到 ${dir}\n`);
+          let remoteOutput = "";
+          await ssh("ssh", [destination, remoteDeployScript(dir, remoteArchive, token)], { signal, onOutput: text => { remoteOutput += text; } });
+          log(formatRemoteOutput(remoteOutput));
+        }
+      } finally {
+        // 取消后仍独立尝试清理，清理错误不覆盖原始发布结果。
+        try {
+          await ssh("ssh", [destination, `rm -rf -- ${quote(remoteTemporary)}`], { signal: AbortSignal.timeout(10_000) });
+        } catch (error) {
+          log(`远程临时目录清理失败，请手动删除 ${remoteTemporary}：${error instanceof Error ? error.message : String(error)}\n`);
+        }
+      }
     });
   } finally {
     await rm(temporary, { recursive: true, force: true });

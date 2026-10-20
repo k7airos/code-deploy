@@ -19,7 +19,7 @@ const fields: FieldDef[] = [
   { key: "host", label: "目标服务器", hint: "IP、域名或 SSH 别名" },
   { key: "user", label: "登录账号", hint: "服务器上的 SSH 登录账号" },
   { key: "port", label: "SSH 端口", hint: "服务器的 SSH 端口" },
-  { key: "remoteDir", label: "远程目录 B", hint: "发布时整体替换此目录，旧内容保留为同级备份" },
+  { key: "remoteDirs", label: "远程目录 B", hint: "可配置多个目录，逐个回车添加；留空回车完成，空输入退格删除最后一个" },
   { key: "buildCommand", label: "构建命令", hint: "在源目录执行；留空表示直接发布已有内容" },
   { key: "outputDir", label: "发布内容", hint: "源目录内的相对路径；. 表示整个源目录，dist 表示构建产物" },
   { key: "expectedBranch", label: "指定分支", hint: "开启分支锁时必须填写；关闭时仅保存此值，不限制发布" },
@@ -31,12 +31,13 @@ const fields: FieldDef[] = [
   { key: "passwordEnv", label: "密码环境变量", hint: "仅环境变量认证使用；这里填写变量名，不是密码" }
 ];
 const actions = ["保存配置", "保存钥匙串密码", "取消修改"];
-const protectedFields: Field[] = ["projectDir", "host", "user", "port", "remoteDir", "expectedBranch"];
+const protectedFields: Field[] = ["projectDir", "host", "user", "port", "remoteDirs", "expectedBranch"];
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export function fieldValue(profile: Profile, key: Field): string {
   if (typeof profile[key] === "boolean") return profile[key] ? "开启" : "关闭";
   if (key === "auth") return authNames[profile.auth];
+  if (key === "remoteDirs") return profile.remoteDirs.join(" · ") || "（未设置）";
   return String(profile[key] || "（未设置）");
 }
 
@@ -51,11 +52,13 @@ export function Settings({ config, profile, initial, onSave, onCancel }: {
   const [enteringPassword, setEnteringPassword] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [typed, setTyped] = useState("");
   const field = fields[step];
   const done = step >= fields.length;
   const fixed = field?.key === "id" && Boolean(profile);
   const locked = Boolean(field && draft.lockMapping && protectedFields.includes(field.key));
   const isBoolean = field ? typeof draft[field.key] === "boolean" : false;
+  const isDirs = field?.key === "remoteDirs";
 
   async function attempt(task: () => Promise<void>) {
     if (busy) return;
@@ -71,6 +74,17 @@ export function Settings({ config, profile, initial, onSave, onCancel }: {
   function advance() { setError(""); setStep(current => Math.min(fields.length, current + 1)); }
   function submitText(raw: string) {
     if (!field) return;
+    // 远程目录逐个添加：回车一个加一个并留在本项，留空回车才进入下一项。
+    if (field.key === "remoteDirs") {
+      const value = raw.trim();
+      if (!value) { advance(); return; }
+      if (draft.remoteDirs.includes(value)) { setError("该目录已经添加过"); return; }
+      const result = profileSchema.shape.remoteDirs.safeParse([...draft.remoteDirs, value]);
+      if (!result.success) { setError(result.error.issues[0]!.message); return; }
+      setDraft({ ...draft, remoteDirs: result.data });
+      setTyped("");
+      return;
+    }
     let value: string | number = field.key === "port" ? Number(raw) : raw.trim();
     if (field.key === "projectDir" && typeof value === "string" && value.startsWith("~/")) value = `${homedir()}/${value.slice(2)}`;
     const result = profileSchema.shape[field.key].safeParse(value);
@@ -109,8 +123,13 @@ export function Settings({ config, profile, initial, onSave, onCancel }: {
       return;
     }
     if (!field) return;
-    if (key.upArrow) { setError(""); setStep(Math.max(0, step - 1)); return; }
-    if (key.downArrow) { advance(); return; }
+    // 输入框为空时退格，删除最后添加的目录。
+    if (isDirs && !locked && key.backspace && !typed) {
+      setDraft({ ...draft, remoteDirs: draft.remoteDirs.slice(0, -1) });
+      return;
+    }
+    if (key.upArrow) { setError(""); setTyped(""); setStep(Math.max(0, step - 1)); return; }
+    if (key.downArrow) { setTyped(""); advance(); return; }
     if (fixed || locked) { if (key.return) advance(); return; }
     if (isBoolean) {
       if (input === " " || key.leftArrow || key.rightArrow) toggleBoolean();
@@ -131,7 +150,7 @@ export function Settings({ config, profile, initial, onSave, onCancel }: {
     <Box flexDirection="column" marginTop={1}>
       {fields.slice(0, step).map(item => <Box key={item.key}>
         <Box width={16} flexShrink={0}><Text color={colors.muted} wrap="truncate">{item.label}</Text></Box>
-        <Box flexGrow={1} minWidth={0}><Text wrap="truncate" color={typeof draft[item.key] === "boolean" ? (draft[item.key] ? colors.good : colors.muted) : (!draft[item.key] ? colors.muted : undefined)}>{fieldValue(draft, item.key)}</Text></Box>
+        <Box flexGrow={1} minWidth={0}><Text wrap="truncate" color={typeof draft[item.key] === "boolean" ? (draft[item.key] ? colors.good : colors.muted) : (fieldValue(draft, item.key) === "（未设置）" ? colors.muted : undefined)}>{fieldValue(draft, item.key)}</Text></Box>
       </Box>)}
       {!done && field && <Box flexDirection="column" marginTop={step > 0 ? 1 : 0}>
         <Box>
@@ -141,10 +160,11 @@ export function Settings({ config, profile, initial, onSave, onCancel }: {
               ? <Text color={isBoolean && !draft[field.key] ? colors.muted : colors.accent}>{fieldValue(draft, field.key)} <Text color={colors.muted}>（←→ 切换）</Text></Text>
               : fixed || locked
                 ? <Text wrap="truncate">{fieldValue(draft, field.key)} <Text color={colors.muted}>（{fixed ? "创建后固定" : "映射锁已锁定"}）</Text></Text>
-                : <TextInput key={`${field.key}-${step}`} defaultValue={String(draft[field.key] || "")} onSubmit={submitText} />}
+                : <TextInput key={`${field.key}-${step}-${isDirs ? draft.remoteDirs.length : 0}`} defaultValue={isDirs ? "" : String(draft[field.key] || "")} onChange={isDirs ? setTyped : undefined} onSubmit={submitText} />}
           </Box>
         </Box>
         <Text color={colors.muted} wrap="truncate">  {field.hint}</Text>
+        {isDirs && draft.remoteDirs.length > 0 && <Text color={colors.muted} wrap="truncate">  已添加: {draft.remoteDirs.join(" · ")}</Text>}
       </Box>}
       {done && <Box flexDirection="column" marginTop={1}>
         <Box gap={2}>
@@ -157,7 +177,7 @@ export function Settings({ config, profile, initial, onSave, onCancel }: {
           setDraft({ ...parsed, auth: "keychain" }); setEnteringPassword(false);
         })} />}
       </Box>}
-      {draft.lockMapping && draft.mapping && <Text color={colors.warm} wrap="truncate">锁定映射：{draft.mapping.projectDir} → {draft.mapping.host}:{draft.mapping.remoteDir}（分支由分支锁单独约束）</Text>}
+      {draft.lockMapping && draft.mapping && <Text color={colors.warm} wrap="truncate">锁定映射：{draft.mapping.projectDir} → {draft.mapping.host}:{draft.mapping.remoteDirs.join(" · ")}（分支由分支锁单独约束）</Text>}
       {error && <Text color={colors.error} wrap="truncate">{error}</Text>}
     </Box>
     <Box marginTop={1} flexDirection="column">

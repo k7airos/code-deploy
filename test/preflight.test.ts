@@ -15,7 +15,7 @@ async function fixture(task: (directory: string, profile: Profile) => Promise<vo
   const directory = await realpath(temporary);
   try {
     process.chdir(directory);
-    const profile = { ...newProfile(), id: "demo", name: "Demo", host: "example.test", user: "deploy", remoteDir: "/srv/app" };
+    const profile = { ...newProfile(), id: "demo", name: "Demo", host: "example.test", user: "deploy", remoteDirs: ["/srv/app"] };
     await task(directory, profile);
   } finally { process.chdir(cwd); await rm(temporary, { recursive: true, force: true }); }
 }
@@ -33,13 +33,23 @@ test("通用默认配置、非 Git 目录与旧配置迁移", async () => fixtur
   await assert.rejects(prepareRelease(profile), GitConfirmationRequired);
   assert.equal((await prepareRelease({ ...profile, checkGit: false })).warnings.length, 0);
   const file = path.join(directory, "legacy.json");
-  const { lockBranch, lockDirectory, lockMapping, checkGit, ...legacy } = profile;
-  await writeFile(file, JSON.stringify({ version: 1, profiles: [{ ...legacy, expectedBranch: "release" }] }));
+  const { lockBranch, lockDirectory, lockMapping, checkGit, remoteDirs, ...legacy } = profile;
+  await writeFile(file, JSON.stringify({ version: 1, profiles: [{ ...legacy, remoteDir: "/srv/app", expectedBranch: "release" }] }));
   const migrated = (await loadConfig(file)).profiles[0]!;
+  assert.deepEqual(migrated.remoteDirs, ["/srv/app"]); // 旧配置的单个远程目录迁移为列表
   assert.equal(migrated.lockDirectory, true);
   assert.equal(migrated.lockBranch, true);
   assert.equal(migrated.lockMapping, false);
   assert.equal(migrated.checkGit, true);
+  // 关闭映射锁后保留的旧快照，也必须能正常迁移。
+  for (const lockMapping of [true, false]) {
+    await writeFile(file, JSON.stringify({ version: 1, profiles: [{ ...legacy, remoteDir: "/srv/app", lockMapping, mapping: {
+      projectDir: directory, branch: "main", host: profile.host, user: profile.user, port: profile.port, remoteDir: "/srv/app"
+    } }] }));
+    const mapped = (await loadConfig(file)).profiles[0]!;
+    assert.deepEqual(mapped.mapping!.remoteDirs, ["/srv/app"]);
+    assert.equal(mapped.lockMapping, lockMapping);
+  }
 }));
 
 test("目录锁、分支锁和映射锁独立生效；其他配置不能破坏一一映射", async () => fixture(async (directory, profile) => {
@@ -56,7 +66,7 @@ test("目录锁、分支锁和映射锁独立生效；其他配置不能破坏�
   const mismatched = await captureMapping({ ...profile, lockBranch: true, expectedBranch: "other" });
   assert.equal(mismatched.mapping!.branch, "main");
   assert.equal((await inspectProject(locked)).directory, directory);
-  await assert.rejects(inspectProject({ ...locked, remoteDir: "/srv/other" }), /映射不匹配/);
+  await assert.rejects(inspectProject({ ...locked, remoteDirs: ["/srv/other"] }), /映射不匹配/);
   await assert.rejects(inspectProject({ ...locked, host: "other.test" }), /映射不匹配/);
   await git(["switch", "-c", "feature"]);
   // 同目录换任务分支不破坏映射；分支正误由分支锁单独约束
@@ -64,8 +74,17 @@ test("目录锁、分支锁和映射锁独立生效；其他配置不能破坏�
   await assert.rejects(inspectProject({ ...locked, lockBranch: true, expectedBranch: "main" }), /分支不匹配/);
   await git(["switch", "main"]);
   const file = path.join(directory, "config.json");
-  await assert.rejects(saveConfig({ version: 1, profiles: [locked, { ...locked, id: "conflict", remoteDir: "/srv/other", mapping: { ...locked.mapping!, remoteDir: "/srv/other" } }] }, file), /一一对应/);
-  await assert.rejects(saveConfig({ version: 1, profiles: [{ ...locked, remoteDir: "/srv/other" }] }, file), /不一致/);
+  await assert.rejects(saveConfig({ version: 1, profiles: [locked, { ...locked, id: "conflict", remoteDirs: ["/srv/other"], mapping: { ...locked.mapping!, remoteDirs: ["/srv/other"] } }] }, file), /一一对应/);
+  await assert.rejects(saveConfig({ version: 1, profiles: [{ ...locked, remoteDirs: ["/srv/other"] }] }, file), /不一致/);
+  const first = { ...locked, remoteDirs: ["/srv/app", "/srv/other"], mapping: { ...locked.mapping!, remoteDirs: ["/srv/app", "/srv/other"] } };
+  for (const remoteDirs of [["/srv/app/"], ["/srv/app/child"]]) {
+    const second = { ...locked, id: "second", projectDir: path.join(directory, "second"), remoteDirs,
+      mapping: { ...locked.mapping!, projectDir: path.join(directory, "second"), remoteDirs } };
+    await assert.rejects(saveConfig({ version: 1, profiles: [first, second] }, file), /一一对应/);
+  }
+  const separate = { ...locked, id: "separate", projectDir: path.join(directory, "separate"), remoteDirs: ["/srv/app2"],
+    mapping: { ...locked.mapping!, projectDir: path.join(directory, "separate"), remoteDirs: ["/srv/app2"] } };
+  await saveConfig({ version: 1, profiles: [first, separate] }, file);
 }));
 
 test("未提交、暂存、未跟踪状态提醒；确认前不继续，取消即终止", async () => fixture(async (_directory, profile) => {

@@ -17,17 +17,19 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const formatDuration = (ms: number) => ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
 // 目录只留最后两级，帮助辨认目标。
 const shortDir = (dir: string) => `…/${dir.split("/").filter(Boolean).slice(-2).join("/")}`;
+// 多个目标时只显示第一个，其余用数量提示。
+const dirList = (dirs: string[]) => dirs.map(shortDir).join(" ") + (dirs.length > 1 ? ` +${dirs.length - 1}` : "");
 
 // 源目录和实际分支放在配置旁边，发布前能直接核对 A → B。
 function Summary({ profile, project }: { profile: Profile; project: string }) {
   const rows = [
     ["源目录 A", profile.lockDirectory || profile.lockMapping ? profile.projectDir : `${process.cwd()}（启动目录）`],
-    ["Git 状态", project], ["远程目录 B", `${profile.user}@${profile.host}:${profile.port}${profile.remoteDir}`],
+    ["Git 状态", project], ["远程目录 B", `${profile.user}@${profile.host}:${profile.port} ${dirList(profile.remoteDirs)}`],
     ["构建命令", profile.buildCommand || "跳过构建，直接发布"], ["发布内容", profile.outputDir],
     ["登录方式", `${authNames[profile.auth]}${profile.auth === "env" ? ` · ${profile.passwordEnv}` : ""}`],
     ["目录锁", profile.lockDirectory ? `开启 · ${profile.projectDir}` : "关闭"],
     ["分支锁", profile.lockBranch ? `开启 · ${profile.expectedBranch}` : "关闭"],
-    ["映射锁", profile.lockMapping ? `开启 · ${profile.mapping ? shortDir(profile.mapping.remoteDir) : "未绑定"}` : "关闭"],
+    ["映射锁", profile.lockMapping ? `开启 · ${profile.mapping ? dirList(profile.mapping.remoteDirs) : "未绑定"}` : "关闭"],
     ["Git 检查", profile.checkGit ? "开启 · 异常需确认" : "关闭"]
   ];
   return <Box flexDirection="column">
@@ -167,7 +169,7 @@ export function App({ initialConfig, initialId }: { initialConfig: Config; initi
         {config.profiles.map((item, offset) => <Box key={item.id}>
           <Box width={2} flexShrink={0}><Text color={offset === index ? colors.accent : undefined}>{offset === index ? "›" : ""}</Text></Box>
           <Box width={14} flexShrink={0}><Text bold={offset === index} color={offset === index ? colors.accent : undefined} wrap="truncate">{item.name}</Text></Box>
-          <Box flexGrow={1} minWidth={0}><Text color={colors.muted} wrap="truncate">{item.user}@{item.host} {shortDir(item.remoteDir)}</Text></Box>
+          <Box flexGrow={1} minWidth={0}><Text color={colors.muted} wrap="truncate">{item.user}@{item.host} {dirList(item.remoteDirs)}</Text></Box>
         </Box>)}
         {!config.profiles.length && <Text color={colors.muted}>暂无配置 · 按 n 新建</Text>}
       </Box>}
@@ -185,6 +187,7 @@ export function App({ initialConfig, initialId }: { initialConfig: Config; initi
         </Box>}
         {screen === "confirm" && <>
           <Text color={colors.warm}>发布前将检查锁定规则和 Git 状态，再替换远程目录 B。</Text>
+          {profile.remoteDirs.map(dir => <Text key={dir} wrap="truncate">B: {profile.user}@{profile.host}:{profile.port}{dir}</Text>)}
           <Text>确认发布？ [y/N]</Text>
           <ConfirmInput defaultChoice="cancel" onConfirm={() => startJob(false)} onCancel={() => setScreen("dashboard")} />
         </>}

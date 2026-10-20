@@ -46,7 +46,7 @@ async function main() {
   if (command === "list") {
     if (!config.profiles.length) console.log("暂无环境，运行 code-deploy 新建。");
     for (const profile of config.profiles) {
-      console.log(`${profile.id}  ${profile.name}\n  A: ${profile.lockDirectory || profile.lockMapping ? profile.projectDir : "启动目录"}\n  B: ${profile.user}@${profile.host}:${profile.port}${profile.remoteDir}\n  目录锁: ${profile.lockDirectory} · 分支锁: ${profile.lockBranch ? profile.expectedBranch : "关闭"} · 映射锁: ${profile.lockMapping} · Git 检查: ${profile.checkGit}\n`);
+      console.log(`${profile.id}  ${profile.name}\n  A: ${profile.lockDirectory || profile.lockMapping ? profile.projectDir : "启动目录"}\n  B: ${profile.user}@${profile.host}:${profile.port}\n${profile.remoteDirs.map(dir => `     ${dir}`).join("\n")}\n  目录锁: ${profile.lockDirectory} · 分支锁: ${profile.lockBranch ? profile.expectedBranch : "关闭"} · 映射锁: ${profile.lockMapping} · Git 检查: ${profile.checkGit}\n`);
     }
     return;
   }
@@ -62,8 +62,9 @@ async function main() {
     }
     const controller = new AbortController();
     const abort = () => controller.abort();
-    process.once("SIGINT", abort);
-    process.once("SIGTERM", abort);
+    // 连续 Ctrl+C 仍等待构建进程树清理，不能恢复默认信号行为而提前退出。
+    process.on("SIGINT", abort);
+    process.on("SIGTERM", abort);
     try {
       if (command === "check") {
         const project = await inspectProject(profile, controller.signal, profile.checkGit);
@@ -71,7 +72,7 @@ async function main() {
         if (project.warnings.length) console.log(`Git 状态提醒：\n${project.warnings.join("\n\n")}`);
         console.log(await checkServer(profile, controller.signal));
       } else {
-        console.log(`发布 ${profile.name}\nA: ${process.cwd()}\nB: ${profile.user}@${profile.host}:${profile.port}${profile.remoteDir}`);
+        console.log(`发布 ${profile.name}\nA: ${process.cwd()}\nB: ${profile.user}@${profile.host}:${profile.port}\n${profile.remoteDirs.map(dir => `   ${dir}`).join("\n")}`);
         const started = Date.now();
         await deploy(profile, event => {
           if (event.type === "step") console.log(`\n[${event.index! + 1}/${steps.length}] ${event.text}`);

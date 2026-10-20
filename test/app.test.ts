@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { setTimeout } from "node:timers/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout } from "node:timers/promises";
 import { createElement } from "react";
 import { render } from "ink-testing-library";
 import { App } from "../src/app.js";
 import { Settings } from "../src/settings.js";
-import { run } from "../src/deploy.js";
+import { run } from "../src/process.js";
 import { newProfile, type Profile } from "../src/config.js";
 
-const profile = { ...newProfile(), id: "example", name: "测试环境", host: "example.test", user: "deploy", remoteDir: "/srv/web" };
+const profile = { ...newProfile(), id: "example", name: "测试环境", host: "example.test", user: "deploy", remoteDirs: ["/srv/web"] };
 
 // 预检包含真实子进程，帧出现时间不定：轮询直至匹配。
 const waitFor = async (instance: { lastFrame: () => string | undefined }, pattern: RegExp, timeout = 5000) => {
@@ -57,12 +57,17 @@ test("向导逐项填写，回车接受默认值，Ctrl+S 统一保存", async (
     await key("\r"); // projectDir 接受默认
     await key("example.test"); await key("\r"); // host
     await key("\r"); await key("\r"); // user、port 接受默认
-    await key("/srv/demo"); await key("\r"); // remoteDir
+    await key("/srv/demo"); await key("\r"); // 添加第一个远程目录
+    await key("/srv/other"); await key("\r"); // 添加第二个远程目录
+    assert.match(instance.lastFrame()!, /已添加: \/srv\/demo · \/srv\/other/);
+    await key("\u007f"); // 输入框为空时退格，删除最后一个目录
+    assert.match(instance.lastFrame()!, /已添加: \/srv\/demo\n/);
+    await key("\r"); // 留空回车，进入下一项
     await key("\u0013"); // Ctrl+S，其余保持默认
     assert.equal(saved?.id, "demo", instance.lastFrame());
     assert.equal(saved?.name, "Demo app");
     assert.equal(saved?.host, "example.test");
-    assert.equal(saved?.remoteDir, "/srv/demo");
+    assert.deepEqual(saved?.remoteDirs, ["/srv/demo"]);
     assert.equal(saved?.checkGit, true);
   } finally { instance.unmount(); instance.cleanup(); }
 });

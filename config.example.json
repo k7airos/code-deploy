@@ -8,7 +8,9 @@
       "host": "server-alias",
       "user": "deploy",
       "port": 22,
-      "remoteDir": "/data/web/example_test/dist",
+      "remoteDirs": [
+        "/data/web/example_test/dist"
+      ],
       "buildCommand": "npm run build",
       "outputDir": "dist",
       "expectedBranch": "main",

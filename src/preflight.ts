@@ -87,7 +87,7 @@ export async function captureMapping(profile: Profile, signal?: AbortSignal): Pr
   if (!state.branch) throw new Error("请先检出要锁定的发布分支");
   return { ...profile, projectDir: state.directory, lockMapping: true, mapping: {
     projectDir: state.directory, branch: state.branch, host: profile.host, user: profile.user,
-    port: profile.port, remoteDir: profile.remoteDir
+    port: profile.port, remoteDirs: [...profile.remoteDirs]
   } };
 }
 
