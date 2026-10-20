@@ -92,19 +92,21 @@ export function targetKey(target: Pick<Profile, "host" | "user" | "port" | "remo
   return JSON.stringify([target.host, target.user, target.port, dirs]);
 }
 
-// 旧配置曾固定从 projectDir 构建、只有一个远程目录，迁移时显式保留这些约束。
+// 保留旧目录与分支约束；单目录映射迁移后需重新确认，默认解除映射锁。
 function migrateConfig(value: unknown): unknown {
   if (!value || typeof value !== "object" || !("profiles" in value) || !Array.isArray(value.profiles)) return value;
-  return { ...value, profiles: value.profiles.map(profile => ({
-    ...profile,
-    lockDirectory: profile.lockDirectory ?? true,
-    lockBranch: profile.lockBranch ?? Boolean(profile.expectedBranch),
-    remoteDirs: profile.remoteDirs ?? (profile.remoteDir ? [profile.remoteDir] : []),
-    ...(profile.mapping ? { mapping: {
-      ...profile.mapping,
-      remoteDirs: profile.mapping.remoteDirs ?? (profile.mapping.remoteDir ? [profile.mapping.remoteDir] : [])
-    } } : {})
-  })) };
+  return { ...value, profiles: value.profiles.map(profile => {
+    // 只解除旧格式的映射锁，新版配置仍执行原有锁定校验。
+    const legacyMapping = (profile.remoteDirs == null && Boolean(profile.remoteDir)) ||
+      (profile.mapping?.remoteDirs == null && Boolean(profile.mapping?.remoteDir));
+    return {
+      ...profile,
+      lockDirectory: profile.lockDirectory ?? true,
+      lockBranch: profile.lockBranch ?? Boolean(profile.expectedBranch),
+      remoteDirs: profile.remoteDirs ?? (profile.remoteDir ? [profile.remoteDir] : []),
+      ...(legacyMapping ? { lockMapping: false, mapping: undefined } : {})
+    };
+  }) };
 }
 
 // 只将“文件不存在”视为空配置，避免损坏配置被悄悄覆盖。

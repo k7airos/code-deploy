@@ -41,15 +41,33 @@ test("通用默认配置、非 Git 目录与旧配置迁移", async () => fixtur
   assert.equal(migrated.lockBranch, true);
   assert.equal(migrated.lockMapping, false);
   assert.equal(migrated.checkGit, true);
-  // 关闭映射锁后保留的旧快照，也必须能正常迁移。
+  // 旧映射锁默认解除，保留目录和分支约束，允许迁移后添加目标目录。
   for (const lockMapping of [true, false]) {
-    await writeFile(file, JSON.stringify({ version: 1, profiles: [{ ...legacy, remoteDir: "/srv/app", lockMapping, mapping: {
+    await writeFile(file, JSON.stringify({ version: 1, profiles: [{ ...legacy, remoteDir: "/srv/app", expectedBranch: "release", lockMapping, mapping: {
       projectDir: directory, branch: "main", host: profile.host, user: profile.user, port: profile.port, remoteDir: "/srv/app"
     } }] }));
     const mapped = (await loadConfig(file)).profiles[0]!;
-    assert.deepEqual(mapped.mapping!.remoteDirs, ["/srv/app"]);
-    assert.equal(mapped.lockMapping, lockMapping);
+    assert.deepEqual(mapped.remoteDirs, ["/srv/app"]);
+    assert.equal(mapped.mapping, undefined);
+    assert.equal(mapped.lockMapping, false);
+    assert.equal(mapped.lockDirectory, true);
+    assert.equal(mapped.lockBranch, true);
+    const expanded = { ...mapped, remoteDirs: [...mapped.remoteDirs, "/srv/other"] };
+    await saveConfig({ version: 1, profiles: [expanded] }, file);
+    const reloaded = (await loadConfig(file)).profiles[0]!;
+    assert.deepEqual(reloaded.remoteDirs, expanded.remoteDirs);
+    assert.equal(reloaded.lockMapping, false);
+    assert.equal(reloaded.mapping, undefined);
   }
+  // 已填写多目录但仍携带旧快照时，也不能被旧映射锁挡住启动和编辑。
+  const expandedDirs = ["/srv/app", "/srv/other"];
+  await writeFile(file, JSON.stringify({ version: 1, profiles: [{ ...profile, remoteDirs: expandedDirs, lockMapping: true, mapping: {
+    projectDir: directory, branch: "main", host: profile.host, user: profile.user, port: profile.port, remoteDir: "/srv/old"
+  } }] }));
+  const partial = (await loadConfig(file)).profiles[0]!;
+  assert.equal(partial.lockMapping, false);
+  assert.equal(partial.mapping, undefined);
+  assert.deepEqual(partial.remoteDirs, expandedDirs);
 }));
 
 test("目录锁、分支锁和映射锁独立生效；其他配置不能破坏一一映射", async () => fixture(async (directory, profile) => {
@@ -74,6 +92,8 @@ test("目录锁、分支锁和映射锁独立生效；其他配置不能破坏�
   await assert.rejects(inspectProject({ ...locked, lockBranch: true, expectedBranch: "main" }), /分支不匹配/);
   await git(["switch", "main"]);
   const file = path.join(directory, "config.json");
+  await saveConfig({ version: 1, profiles: [locked] }, file);
+  assert.deepEqual((await loadConfig(file)).profiles[0], locked); // 新版有效映射锁保持开启
   await assert.rejects(saveConfig({ version: 1, profiles: [locked, { ...locked, id: "conflict", remoteDirs: ["/srv/other"], mapping: { ...locked.mapping!, remoteDirs: ["/srv/other"] } }] }, file), /一一对应/);
   await assert.rejects(saveConfig({ version: 1, profiles: [{ ...locked, remoteDirs: ["/srv/other"] }] }, file), /不一致/);
   const first = { ...locked, remoteDirs: ["/srv/app", "/srv/other"], mapping: { ...locked.mapping!, remoteDirs: ["/srv/app", "/srv/other"] } };
