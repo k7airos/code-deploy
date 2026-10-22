@@ -25,7 +25,7 @@ test("TUI 环境列表、发布默认取消和向导编辑", async () => {
   const instance = render(createElement(App, { initialConfig: { version: 1, profiles: [profile] } }));
   try {
     await setTimeout(100);
-    assert.match(instance.lastFrame()!, /› 测试环境/); // 纵向列表
+    assert.match(instance.lastFrame()!, /▌ 测试环境/); // 纵向列表
     assert.match(instance.lastFrame()!, /deploy@example\.test/); // 目标服务器
     assert.match(instance.lastFrame()!, /…\/srv\/web/); // 目录最后两级
     instance.stdin.write("\r"); await setTimeout(60);
@@ -61,7 +61,8 @@ test("向导逐项填写，回车接受默认值，Ctrl+S 统一保存", async (
     await key("/srv/other"); await key("\r"); // 添加第二个远程目录
     assert.match(instance.lastFrame()!, /已添加: \/srv\/demo · \/srv\/other/);
     await key("\u007f"); // 输入框为空时退格，删除最后一个目录
-    assert.match(instance.lastFrame()!, /已添加: \/srv\/demo\n/);
+    assert.match(instance.lastFrame()!, /已添加: \/srv\/demo\s/);
+    assert.ok(!/已添加:.*other/.test(instance.lastFrame()!));
     await key("\r"); // 留空回车，进入下一项
     await key("\u0013"); // Ctrl+S，其余保持默认
     assert.equal(saved?.id, "demo", instance.lastFrame());
@@ -82,12 +83,12 @@ test("开关字段空格切换，登录方式方向键循环", async () => {
   try {
     await setTimeout(70);
     for (let i = 0; i < 13; i++) await key("\u001b[B"); // id → checkGit
-    assert.match(instance.lastFrame()!, /Git 状态检查\s+开启/);
+    assert.match(instance.lastFrame()!, /Git 状态检查\s+● 开启/);
     await key(" "); // 开启 → 关闭
-    assert.match(instance.lastFrame()!, /Git 状态检查\s+关闭/);
+    assert.match(instance.lastFrame()!, /Git 状态检查\s+○ 开启\s+● 关闭/);
     await key("\u001b[B"); // → 登录方式
     await key("\u001b[C"); // ssh → env
-    assert.match(instance.lastFrame()!, /登录方式\s+环境变量/);
+    assert.match(instance.lastFrame()!, /登录方式\s+● 环境变量/);
     await key("\u0013");
     assert.equal(saved?.checkGit, false, instance.lastFrame());
     assert.equal(saved?.auth, "env");
@@ -141,8 +142,21 @@ test("无配置时保持列表 + 预览的统一布局", async () => {
   try {
     await setTimeout(80);
     const frame = instance.lastFrame()!;
-    assert.match(frame, /暂无配置/);
-    assert.match(frame, /配置一次，选择发布/);
-    assert.match(frame, /↑↓ 选择 · Enter 发布/);
+    assert.match(frame, /暂无环境配置/);
+    assert.match(frame, /新建第一个环境/);
+    assert.match(frame, /n 新建\s+\/ 命令/);
+  } finally { instance.unmount(); instance.cleanup(); }
+});
+
+test("Ctrl+D 只用于滚动，不触发 d（复制）等单字母快捷键", async () => {
+  const instance = render(createElement(App, { initialConfig: { version: 1, profiles: [profile] } }));
+  try {
+    await setTimeout(100);
+    instance.stdin.write("\u0004"); await setTimeout(60);
+    assert.match(instance.lastFrame()!, /Enter 发布/); // 仍停留在仪表盘
+    assert.ok(!/新建配置/.test(instance.lastFrame()!));
+    instance.stdin.write("\u001b"); await setTimeout(60); // Esc 不受影响
+    instance.stdin.write("d"); await setTimeout(60);
+    assert.match(instance.lastFrame()!, /新建配置/);
   } finally { instance.unmount(); instance.cleanup(); }
 });

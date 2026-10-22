@@ -55,7 +55,7 @@ async function main() {
     if (!profile) throw new Error(`找不到环境 ${id || "（未指定）"}，运行 code-deploy list 查看`);
     if (command === "deploy" && !values.yes) {
       if (process.stdin.isTTY && process.stdout.isTTY) {
-        await render(<App initialConfig={config} initialId={id} />, { alternateScreen: true, exitOnCtrlC: false }).waitUntilExit();
+        await render(<App initialConfig={config} initialId={id} />, { alternateScreen: true, exitOnCtrlC: false, incrementalRendering: true }).waitUntilExit();
         return;
       }
       throw new Error("非交互发布需要 --yes 明确确认；发布将替换配置的远程目录");
@@ -95,7 +95,7 @@ async function main() {
   }
   if (command && !config.profiles.some(profile => profile.id === command)) throw new Error(`未知命令或环境：${command}\n${help}`);
   if (!process.stdin.isTTY || !process.stdout.isTTY) { console.log(help); return; }
-  await render(<App initialConfig={config} initialId={command} />, { alternateScreen: true, exitOnCtrlC: false }).waitUntilExit();
+  await render(<App initialConfig={config} initialId={command} />, { alternateScreen: true, exitOnCtrlC: false, incrementalRendering: true }).waitUntilExit();
 }
 
 main().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });

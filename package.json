@@ -26,6 +26,7 @@
     "@napi-rs/keyring": "^2.1.1",
     "ink": "^8.0.0",
     "react": "^19.2.0",
+    "string-width": "^8.3.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
